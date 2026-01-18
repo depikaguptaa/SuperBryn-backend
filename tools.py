@@ -1,10 +1,10 @@
 """
 Tool functions for the voice agent.
 These are the actions the agent can take during a conversation.
-Using standalone decorated functions (current livekit-agents API).
+Using function_tool decorator (current livekit-agents API).
 """
 from datetime import datetime, timedelta
-from typing import Optional, Annotated
+from typing import Optional
 from livekit.agents import llm
 import database as db
 
@@ -50,14 +50,17 @@ def generate_available_slots(date_str: str) -> list[str]:
 
 
 # ============================================================================
-# TOOL FUNCTIONS - Standalone decorated functions
+# TOOL FUNCTIONS - Using @llm.function_tool decorator
 # ============================================================================
 
-@llm.ai_callable(description="Identify the user by their phone number. Call this when the user provides their phone number.")
-async def identify_user(
-    phone_number: Annotated[str, llm.TypeInfo(description="The user's phone number, e.g., +1234567890")]
-) -> str:
-    """Identify user by phone number."""
+@llm.function_tool(description="Identify the user by their phone number. Call this when the user provides their phone number.")
+async def identify_user(phone_number: str) -> str:
+    """
+    Identify user by phone number.
+    
+    Args:
+        phone_number: The user's phone number, e.g., +1234567890
+    """
     context.user_phone = phone_number
     
     user = db.get_user_by_phone(phone_number)
@@ -71,11 +74,14 @@ async def identify_user(
         return f"I've registered your phone number {phone_number}. Welcome! How can I help you today?"
 
 
-@llm.ai_callable(description="Fetch available appointment slots for a specific date. The slots are 30 minutes each, from 9 AM to 5 PM.")
-async def fetch_slots(
-    date: Annotated[str, llm.TypeInfo(description="The date to check slots for, in YYYY-MM-DD format")]
-) -> str:
-    """Get available appointment slots for a date."""
+@llm.function_tool(description="Fetch available appointment slots for a specific date. The slots are 30 minutes each, from 9 AM to 5 PM.")
+async def fetch_slots(date: str) -> str:
+    """
+    Get available appointment slots for a date.
+    
+    Args:
+        date: The date to check slots for, in YYYY-MM-DD format
+    """
     try:
         requested_date = datetime.strptime(date, "%Y-%m-%d").date()
         today = datetime.now().date()
@@ -103,13 +109,16 @@ async def fetch_slots(
         return "I couldn't understand that date. Please provide a date in the format year-month-day, like 2024-01-20."
 
 
-@llm.ai_callable(description="Book an appointment for the user. The user must be identified first.")
-async def book_appointment(
-    date: Annotated[str, llm.TypeInfo(description="The appointment date in YYYY-MM-DD format")],
-    time: Annotated[str, llm.TypeInfo(description="The appointment time in HH:MM format (24-hour)")],
-    description: Annotated[str, llm.TypeInfo(description="Brief description of the appointment purpose")] = "General appointment"
-) -> str:
-    """Book an appointment for the identified user."""
+@llm.function_tool(description="Book an appointment for the user. The user must be identified first.")
+async def book_appointment(date: str, time: str, description: str = "General appointment") -> str:
+    """
+    Book an appointment for the identified user.
+    
+    Args:
+        date: The appointment date in YYYY-MM-DD format
+        time: The appointment time in HH:MM format (24-hour)
+        description: Brief description of the appointment purpose
+    """
     if not context.user_phone:
         return "I need to identify you first. Could you please provide your phone number?"
     
@@ -145,7 +154,7 @@ async def book_appointment(
         return result["message"]
 
 
-@llm.ai_callable(description="Retrieve all appointments for the current user.")
+@llm.function_tool(description="Retrieve all appointments for the current user.")
 async def retrieve_appointments() -> str:
     """Get all appointments for the identified user."""
     if not context.user_phone:
@@ -180,11 +189,14 @@ async def retrieve_appointments() -> str:
     return response
 
 
-@llm.ai_callable(description="Cancel an existing appointment by its ID.")
-async def cancel_appointment(
-    appointment_id: Annotated[str, llm.TypeInfo(description="The unique ID of the appointment to cancel")]
-) -> str:
-    """Cancel an appointment."""
+@llm.function_tool(description="Cancel an existing appointment by its ID.")
+async def cancel_appointment(appointment_id: str) -> str:
+    """
+    Cancel an appointment.
+    
+    Args:
+        appointment_id: The unique ID of the appointment to cancel
+    """
     result = db.cancel_appointment(appointment_id)
     
     if result["success"]:
@@ -197,17 +209,20 @@ async def cancel_appointment(
         return result["message"]
 
 
-@llm.ai_callable(description="Modify an existing appointment's date and/or time.")
-async def modify_appointment(
-    appointment_id: Annotated[str, llm.TypeInfo(description="The unique ID of the appointment to modify")],
-    new_date: Annotated[str, llm.TypeInfo(description="The new date in YYYY-MM-DD format")] = None,
-    new_time: Annotated[str, llm.TypeInfo(description="The new time in HH:MM format (24-hour)")] = None
-) -> str:
-    """Modify an appointment's date or time."""
+@llm.function_tool(description="Modify an existing appointment's date and/or time.")
+async def modify_appointment(appointment_id: str, new_date: str = "", new_time: str = "") -> str:
+    """
+    Modify an appointment's date or time.
+    
+    Args:
+        appointment_id: The unique ID of the appointment to modify
+        new_date: The new date in YYYY-MM-DD format (optional)
+        new_time: The new time in HH:MM format (optional)
+    """
     if not new_date and not new_time:
         return "Please specify a new date or time for the appointment."
     
-    result = db.modify_appointment(appointment_id, new_date, new_time)
+    result = db.modify_appointment(appointment_id, new_date if new_date else None, new_time if new_time else None)
     
     if result["success"]:
         context.appointments_discussed.append({
@@ -221,11 +236,14 @@ async def modify_appointment(
         return result["message"]
 
 
-@llm.ai_callable(description="End the conversation. Call this when the user indicates they want to end the call or says goodbye.")
-async def end_conversation(
-    user_preferences: Annotated[str, llm.TypeInfo(description="Any preferences or notes the user mentioned during the conversation")] = ""
-) -> str:
-    """End the conversation and generate summary."""
+@llm.function_tool(description="End the conversation. Call this when the user indicates they want to end the call or says goodbye.")
+async def end_conversation(user_preferences: str = "") -> str:
+    """
+    End the conversation and generate summary.
+    
+    Args:
+        user_preferences: Any preferences or notes the user mentioned during the conversation
+    """
     if user_preferences:
         context.preferences_mentioned.append(user_preferences)
     
