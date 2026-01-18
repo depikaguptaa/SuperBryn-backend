@@ -9,8 +9,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-# Expose port for token server
-EXPOSE 8080
+# Expose port for token server (Render uses 10000 by default)
+EXPOSE 10000
 
-# Run the agent
+# Set environment variable for token server port
+ENV TOKEN_SERVER_PORT=10000
+
+# Run the agent (includes embedded token server)
 CMD ["python", "agent.py", "start"]
