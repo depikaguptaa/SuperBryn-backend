@@ -24,7 +24,7 @@ from livekit.agents import (
 from livekit.plugins import deepgram, cartesia, openai
 from livekit.agents.llm import ChatContext, ChatMessage
 
-from tools import AssistantFunctions, context
+from tools import TOOLS, context
 
 # Load environment variables
 load_dotenv()
@@ -165,7 +165,7 @@ class VoiceAgent(Agent):
                 api_key=os.getenv("CARTESIA_API_KEY"),
                 voice="a0e99841-438c-4a64-b679-ae501e7d6091",
             ),
-            fnc_ctx=AssistantFunctions(),
+            tools=TOOLS,
         )
         self._pending_tool_calls = []
     
