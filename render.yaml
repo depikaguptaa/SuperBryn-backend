@@ -1,13 +1,14 @@
 services:
   - type: web
     name: voice-agent-backend
-    env: python
+    runtime: python
     region: oregon
     plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python agent.py start
-    healthCheckPath: /health
     envVars:
+      - key: TOKEN_SERVER_PORT
+        value: 10000
       - key: LIVEKIT_URL
         sync: false
       - key: LIVEKIT_API_KEY

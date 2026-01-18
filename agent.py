@@ -1,13 +1,17 @@
 """
 AI Voice Agent with LiveKit Agents Framework.
 Integrates Deepgram (STT), Cartesia (TTS), and OpenRouter (LLM).
+Includes embedded token server for single-process deployment.
 """
 import os
 import json
 import logging
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
 from dotenv import load_dotenv
 
-from livekit import agents, rtc
+from livekit import agents, rtc, api
 from livekit.agents import (
     AgentSession,
     Agent,
@@ -54,6 +58,94 @@ SLOT DURATION: 30 minutes each
 Be warm, helpful, and efficient. Start by greeting the user and asking how you can help them today."""
 
 
+# ============================================================================
+# EMBEDDED TOKEN SERVER
+# ============================================================================
+
+class TokenHandler(BaseHTTPRequestHandler):
+    """Handle token generation requests."""
+    
+    def do_OPTIONS(self):
+        """Handle CORS preflight."""
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+    
+    def do_GET(self):
+        """Generate a token for a participant."""
+        parsed = urlparse(self.path)
+        params = parse_qs(parsed.query)
+        
+        # Health check endpoint
+        if parsed.path == "/health":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "ok"}).encode())
+            return
+        
+        if parsed.path != "/token":
+            self.send_error(404, "Not Found")
+            return
+        
+        room_name = params.get("room", ["voice-agent-room"])[0]
+        identity = params.get("identity", ["user"])[0]
+        
+        try:
+            token = api.AccessToken(
+                os.getenv("LIVEKIT_API_KEY"),
+                os.getenv("LIVEKIT_API_SECRET"),
+            )
+            token.identity = identity
+            token.name = identity
+            
+            token.add_grant(api.VideoGrants(
+                room_join=True,
+                room=room_name,
+                can_publish=True,
+                can_subscribe=True,
+                can_publish_data=True,
+            ))
+            
+            jwt_token = token.to_jwt()
+            
+            response = {
+                "token": jwt_token,
+                "url": os.getenv("LIVEKIT_URL"),
+                "room": room_name,
+            }
+            
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps(response).encode())
+            
+        except Exception as e:
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": str(e)}).encode())
+    
+    def log_message(self, format, *args):
+        """Suppress default logging."""
+        pass
+
+
+def start_token_server(port: int = 8080):
+    """Start the token server in a background thread."""
+    server = HTTPServer(("0.0.0.0", port), TokenHandler)
+    logger.info(f"Token server running on port {port}")
+    server.serve_forever()
+
+
+# ============================================================================
+# VOICE AGENT
+# ============================================================================
+
 class VoiceAgent(Agent):
     """Custom voice agent with appointment booking capabilities."""
     
@@ -71,7 +163,7 @@ class VoiceAgent(Agent):
             ),
             tts=cartesia.TTS(
                 api_key=os.getenv("CARTESIA_API_KEY"),
-                voice="a0e99841-438c-4a64-b679-ae501e7d6091",  # Professional female voice
+                voice="a0e99841-438c-4a64-b679-ae501e7d6091",
             ),
             fnc_ctx=AssistantFunctions(),
         )
@@ -79,16 +171,14 @@ class VoiceAgent(Agent):
     
     async def on_enter(self):
         """Called when the agent enters the room."""
-        # Initial greeting
         await self.session.generate_reply(
             instructions="Greet the user warmly and ask how you can help them today."
         )
     
     async def on_function_call_start(self, function_name: str, arguments: dict):
         """Called when a function call starts - emit event for frontend."""
-        logger.info(f"Tool call started: {function_name} with args: {arguments}")
+        logger.info(f"Tool call started: {function_name}")
         
-        # Send tool call event to frontend via data channel
         tool_event = {
             "type": "tool_call_start",
             "function": function_name,
@@ -96,10 +186,8 @@ class VoiceAgent(Agent):
             "timestamp": __import__("datetime").datetime.now().isoformat()
         }
         
-        # Store for display
         self._pending_tool_calls.append(tool_event)
         
-        # Publish to room data
         if self.session and self.session.room:
             await self.session.room.local_participant.publish_data(
                 json.dumps(tool_event).encode(),
@@ -109,25 +197,21 @@ class VoiceAgent(Agent):
     
     async def on_function_call_end(self, function_name: str, result: str):
         """Called when a function call completes."""
-        logger.info(f"Tool call completed: {function_name} with result: {result[:100]}...")
+        logger.info(f"Tool call completed: {function_name}")
         
-        # Check if this is the end call signal
         if result == "END_CALL":
-            # Generate final summary for the user
             await self.session.generate_reply(
                 instructions="Thank the user for using the service and wish them a great day. Keep it brief."
             )
-            # End the session after a short delay
             import asyncio
             await asyncio.sleep(3)
             if self.session:
                 await self.session.room.disconnect()
         
-        # Send completion event
         tool_event = {
             "type": "tool_call_end",
             "function": function_name,
-            "result": result[:500],  # Truncate long results
+            "result": result[:500] if result else "",
             "timestamp": __import__("datetime").datetime.now().isoformat()
         }
         
@@ -143,10 +227,8 @@ async def entrypoint(ctx: JobContext):
     """Main entry point for the agent."""
     logger.info(f"Starting voice agent for room: {ctx.room.name}")
     
-    # Connect to the room
     await ctx.connect()
     
-    # Create and start the agent
     agent = VoiceAgent()
     session = AgentSession()
     
@@ -163,4 +245,11 @@ async def entrypoint(ctx: JobContext):
 
 
 if __name__ == "__main__":
+    # Start token server in background thread
+    token_port = int(os.getenv("TOKEN_SERVER_PORT", "8080"))
+    token_thread = threading.Thread(target=start_token_server, args=(token_port,), daemon=True)
+    token_thread.start()
+    logger.info(f"Token server started on port {token_port}")
+    
+    # Run the LiveKit agent
     cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
