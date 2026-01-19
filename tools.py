@@ -61,17 +61,26 @@ async def identify_user(phone_number: str) -> str:
     Args:
         phone_number: The user's phone number, e.g., +1234567890
     """
-    context.user_phone = phone_number
+    import logging
+    logger = logging.getLogger("voice-agent")
     
-    user = db.get_user_by_phone(phone_number)
+    # Normalize phone number - remove spaces, dashes, parentheses
+    normalized_phone = phone_number.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+    logger.info(f"identify_user called. Original: '{phone_number}', Normalized: '{normalized_phone}'")
+    
+    context.user_phone = normalized_phone
+    
+    user = db.get_user_by_phone(normalized_phone)
     if user:
         context.user_name = user.get("name")
+        logger.info(f"Found existing user: {user}")
         if context.user_name:
             return f"Welcome back, {context.user_name}! I found your account. How can I help you today?"
-        return f"Welcome back! I found your account with phone number {phone_number}. How can I help you today?"
+        return f"Welcome back! I found your account with phone number {normalized_phone}. How can I help you today?"
     else:
-        db.create_user(phone_number)
-        return f"I've registered your phone number {phone_number}. Welcome! How can I help you today?"
+        db.create_user(normalized_phone)
+        logger.info(f"Created new user with phone: {normalized_phone}")
+        return f"I've registered your phone number {normalized_phone}. Welcome! How can I help you today?"
 
 
 @llm.function_tool(description="Fetch available appointment slots for a specific date. The slots are 30 minutes each, from 9 AM to 5 PM.")
@@ -188,34 +197,50 @@ async def retrieve_appointments(placeholder: str = "") -> str:
     Args:
         placeholder: Unused placeholder parameter for API compatibility.
     """
+    import logging
+    logger = logging.getLogger("voice-agent")
+    
+    logger.info(f"retrieve_appointments called. context.user_phone = {context.user_phone}")
+    
     if not context.user_phone:
         return "I need to identify you first. Could you please provide your phone number?"
     
     appointments = db.get_user_appointments(context.user_phone)
     
+    logger.info(f"Found {len(appointments) if appointments else 0} appointments for {context.user_phone}")
+    logger.info(f"Appointments data: {appointments}")
+    
     if not appointments:
         return "You don't have any appointments scheduled. Would you like to book one?"
     
-    active = [a for a in appointments if a["status"] == "active"]
+    # Treat null/missing status as "active" (for backwards compatibility)
+    active = [a for a in appointments if a.get("status") in ("active", None) or a.get("status") == ""]
+    
+    logger.info(f"Active appointments after filtering: {len(active)}")
     
     if not active:
         return "You don't have any active appointments. Would you like to book one?"
     
     apt_list = []
-    for apt in active[:5]:
+    for i, apt in enumerate(active[:5], 1):
         date = apt["date"]
         time = apt["time"]
+        apt_id = apt.get("id", "unknown")
         hour = int(time.split(":")[0])
         minute = time.split(":")[1]
         display_hour = hour if hour <= 12 else hour - 12
+        if display_hour == 0:
+            display_hour = 12
         am_pm = "AM" if hour < 12 else "PM"
-        apt_list.append(f"{date} at {display_hour}:{minute} {am_pm}")
+        # Include ID in a natural way for the LLM to reference
+        apt_list.append(f"Appointment {i} (ID: {apt_id}): {date} at {display_hour}:{minute} {am_pm}")
     
     response = f"You have {len(active)} active appointment(s). "
-    response += "Here are your upcoming appointments: " + ", ".join(apt_list)
+    response += "Here are your appointments: " + "; ".join(apt_list)
+    response += ". To cancel or modify, use the appointment ID."
     
     if len(active) > 5:
-        response += f", and {len(active) - 5} more."
+        response += f" You also have {len(active) - 5} more appointments not shown."
     
     return response
 

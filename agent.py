@@ -45,7 +45,10 @@ SYSTEM_PROMPT = """You are a friendly and professional AI assistant for an appoi
 6. Answer questions about the service
 
 USER IDENTIFICATION FLOW:
-- When a user provides their phone number, use the identify_user function
+- When a user provides their phone number, ALWAYS repeat it back to them digit by digit and ask for confirmation
+- Example: "Just to confirm, your phone number is 9-5-5-9-6-3-6-1-2-2, is that correct?"
+- Only proceed with identify_user function AFTER the user confirms the number is correct
+- If the user says the number is wrong, ask them to provide it again
 - For FIRST-TIME users: The system auto-registers them - welcome them warmly as a new user
 - For RETURNING users: The system recognizes them - welcome them back and offer to help with their appointments
 - Phone number is required before booking, viewing, or managing appointments
@@ -58,8 +61,16 @@ IMPORTANT GUIDELINES:
 - Keep responses concise - remember this is a voice conversation
 - If the user mentions any preferences (like preferred times, communication preferences), note them
 
+APPOINTMENT REFERENCES:
+- NEVER ask users for appointment IDs - they don't know them!
+- When a user says "cancel the 9 AM appointment" or "modify the 2 PM slot", YOU must match it to the correct appointment from their list
+- After retrieving appointments, remember them and use the date/time to identify which one the user means
+- If ambiguous (e.g., multiple appointments at same time on different days), ask for clarification using natural language like "Which date - January 20th or 21st?"
+- Use the appointment ID internally when calling cancel_appointment or modify_appointment functions
+
 CRITICAL VOICE RULES:
 - NEVER read function names, parameters, dates in technical format (like 2026-01-20), or any code/JSON out loud
+- NEVER read appointment IDs out loud - they are internal identifiers only
 - When calling functions silently, just wait for the result and then speak naturally about what happened
 - Speak dates in natural format like "January 20th" not "2026-01-20"
 - Speak times naturally like "2 PM" not "14:00"
@@ -179,7 +190,7 @@ class VoiceAgent(Agent):
                 language="en",
             ),
             llm=groq.LLM(
-                model="llama-3.3-70b-versatile",
+                model="meta-llama/llama-4-scout-17b-16e-instruct",
                 api_key=os.getenv("GROQ_API_KEY"),
             ),
             tts=cartesia.TTS(
@@ -218,16 +229,22 @@ class VoiceAgent(Agent):
     
     async def on_function_call_end(self, function_name: str, result: str):
         """Called when a function call completes."""
-        logger.info(f"Tool call completed: {function_name}")
+        logger.info(f"Tool call completed: {function_name}, result: {result[:100] if result else 'None'}")
         
-        if result == "END_CALL":
-            await self.session.generate_reply(
-                instructions="Thank the user for using the service and wish them a great day. Keep it brief."
-            )
-            import asyncio
-            await asyncio.sleep(3)
-            if self.session:
-                await self.session.room.disconnect()
+        # Check for end conversation - by function name OR by result
+        if function_name == "end_conversation" or result == "END_CALL":
+            logger.info("End conversation detected! Saying goodbye and disconnecting...")
+            try:
+                await self.session.generate_reply(
+                    instructions="Thank the user for using the service and wish them a great day. Keep it brief."
+                )
+                import asyncio
+                await asyncio.sleep(3)
+                if self.session and self.session.room:
+                    logger.info("Disconnecting room...")
+                    await self.session.room.disconnect()
+            except Exception as e:
+                logger.error(f"Error during end conversation: {e}")
         
         tool_event = {
             "type": "tool_call_end",
@@ -237,11 +254,15 @@ class VoiceAgent(Agent):
         }
         
         if self.session and self.session.room:
-            await self.session.room.local_participant.publish_data(
-                json.dumps(tool_event).encode(),
-                reliable=True,
-                topic="tool_calls"
-            )
+            try:
+                await self.session.room.local_participant.publish_data(
+                    json.dumps(tool_event).encode(),
+                    reliable=True,
+                    topic="tool_calls"
+                )
+                logger.info(f"Published tool_call_end event for {function_name}")
+            except Exception as e:
+                logger.error(f"Failed to publish tool event: {e}")
 
 
 async def entrypoint(ctx: JobContext):
@@ -289,6 +310,39 @@ async def entrypoint(ctx: JobContext):
             video_enabled=False,
         ),
     )
+    
+    # Register event handler for tool calls - publish to frontend
+    @session.on("function_tools_executed")
+    def on_tools_executed(event):
+        """Handle tool execution events and publish to frontend."""
+        import asyncio
+        
+        # Debug: confirm handler is called
+        logger.info(f"=== TOOL EVENT RECEIVED === event type: {type(event)}")
+        logger.info(f"Event details: {event}")
+        
+        async def publish_tool_events():
+            try:
+                for call in event.function_calls:
+                    logger.info(f"Processing tool call: {call.name}")
+                    tool_event = {
+                        "type": "tool_call_end",
+                        "function": call.name,
+                        "arguments": call.arguments if hasattr(call, 'arguments') else {},
+                        "result": str(call.result)[:500] if hasattr(call, 'result') else "",
+                        "timestamp": __import__("datetime").datetime.now().isoformat()
+                    }
+                    
+                    await ctx.room.local_participant.publish_data(
+                        json.dumps(tool_event).encode(),
+                        reliable=True,
+                        topic="tool_calls"
+                    )
+                    logger.info(f"Published tool event: {call.name}")
+            except Exception as e:
+                logger.error(f"Failed to publish tool events: {e}")
+        
+        asyncio.create_task(publish_tool_events())
     
     # Start avatar immediately after agent session starts (don't await fully)
     if avatar_session:
