@@ -7,6 +7,7 @@ import os
 import json
 import logging
 import threading
+from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from dotenv import load_dotenv
@@ -21,7 +22,7 @@ from livekit.agents import (
     WorkerOptions,
     cli,
 )
-from livekit.plugins import deepgram, cartesia, openai
+from livekit.plugins import deepgram, cartesia, openai, groq, bey
 from livekit.agents.llm import ChatContext, ChatMessage
 
 from tools import TOOLS, context
@@ -36,15 +37,20 @@ logger = logging.getLogger("voice-agent")
 # System prompt for the assistant
 SYSTEM_PROMPT = """You are a friendly and professional AI assistant for an appointment booking service. Your role is to help users:
 
-1. Identify themselves by phone number
+1. Get their phone number for identification
 2. Check available appointment slots (9 AM - 5 PM, 30-minute slots)
 3. Book new appointments
-4. Retrieve their existing appointments
+4. Retrieve their existing appointments  
 5. Cancel or modify appointments
 6. Answer questions about the service
 
+USER IDENTIFICATION FLOW:
+- When a user provides their phone number, use the identify_user function
+- For FIRST-TIME users: The system auto-registers them - welcome them warmly as a new user
+- For RETURNING users: The system recognizes them - welcome them back and offer to help with their appointments
+- Phone number is required before booking, viewing, or managing appointments
+
 IMPORTANT GUIDELINES:
-- Always ask for the user's phone number first if they want to book, view, or manage appointments
 - Be conversational and natural - you're having a voice conversation
 - Confirm all booking details before finalizing
 - After completing a task, ask if there's anything else you can help with
@@ -52,10 +58,27 @@ IMPORTANT GUIDELINES:
 - Keep responses concise - remember this is a voice conversation
 - If the user mentions any preferences (like preferred times, communication preferences), note them
 
+CRITICAL VOICE RULES:
+- NEVER read function names, parameters, dates in technical format (like 2026-01-20), or any code/JSON out loud
+- When calling functions silently, just wait for the result and then speak naturally about what happened
+- Speak dates in natural format like "January 20th" not "2026-01-20"
+- Speak times naturally like "2 PM" not "14:00"
+- If you need to call a function, do it silently without announcing the technical details
+
 AVAILABLE HOURS: Monday to Friday, 9:00 AM to 5:00 PM
 SLOT DURATION: 30 minutes each
 
 Be warm, helpful, and efficient. Start by greeting the user and asking how you can help them today."""
+
+
+def get_system_prompt_with_date():
+    """Get system prompt with current date injected."""
+    today = datetime.now()
+    date_info = f"""\n\nIMPORTANT DATE INFORMATION:
+- Today's date is: {today.strftime('%Y-%m-%d')} ({today.strftime('%A, %B %d, %Y')})
+- When users mention dates, convert them to YYYY-MM-DD format using this as reference
+- Tomorrow would be: {today.strftime('%Y')}-{today.strftime('%m')}-{str(int(today.strftime('%d')) + 1).zfill(2)}"""
+    return SYSTEM_PROMPT + date_info
 
 
 # ============================================================================
@@ -97,17 +120,15 @@ class TokenHandler(BaseHTTPRequestHandler):
             token = api.AccessToken(
                 os.getenv("LIVEKIT_API_KEY"),
                 os.getenv("LIVEKIT_API_SECRET"),
+            ).with_identity(identity).with_name(identity).with_grants(
+                api.VideoGrants(
+                    room_join=True,
+                    room=room_name,
+                    can_publish=True,
+                    can_subscribe=True,
+                    can_publish_data=True,
+                )
             )
-            token.identity = identity
-            token.name = identity
-            
-            token.add_grant(api.VideoGrants(
-                room_join=True,
-                room=room_name,
-                can_publish=True,
-                can_subscribe=True,
-                can_publish_data=True,
-            ))
             
             jwt_token = token.to_jwt()
             
@@ -151,15 +172,15 @@ class VoiceAgent(Agent):
     
     def __init__(self):
         super().__init__(
-            instructions=SYSTEM_PROMPT,
+            instructions=get_system_prompt_with_date(),
             stt=deepgram.STT(
                 api_key=os.getenv("DEEPGRAM_API_KEY"),
                 model="nova-2",
                 language="en",
             ),
-            llm=openai.LLM.with_openrouter(
-                model="meta-llama/llama-3.3-70b-instruct:free",
-                api_key=os.getenv("OPENROUTER_API_KEY"),
+            llm=groq.LLM(
+                model="llama-3.3-70b-versatile",
+                api_key=os.getenv("GROQ_API_KEY"),
             ),
             tts=cartesia.TTS(
                 api_key=os.getenv("CARTESIA_API_KEY"),
@@ -232,6 +253,34 @@ async def entrypoint(ctx: JobContext):
     agent = VoiceAgent()
     session = AgentSession()
     
+    # Initialize Beyond Presence Avatar (optional - only if API key is set)
+    avatar_session = None
+    bey_api_key = os.getenv("BEYOND_PRESENCE_API_KEY") or os.getenv("BEY_API_KEY")
+    
+    if bey_api_key:
+        try:
+            avatar_session = bey.AvatarSession(
+                api_key=bey_api_key,
+                # avatar_id is optional - defaults to Beyond Presence default avatar
+                avatar_participant_name="AI Avatar",
+            )
+            logger.info("Beyond Presence avatar initialized")
+        except Exception as e:
+            logger.warning(f"Could not initialize Beyond Presence avatar: {e}")
+    
+    # Helper to start avatar session
+    async def start_avatar():
+        if avatar_session:
+            try:
+                await avatar_session.start(
+                    room=ctx.room,
+                    agent_session=session,
+                )
+                logger.info("Beyond Presence avatar joined room")
+            except Exception as e:
+                logger.warning(f"Avatar session failed to start: {e}")
+    
+    # Start agent session and avatar session concurrently for faster loading
     await session.start(
         room=ctx.room,
         agent=agent,
@@ -240,6 +289,11 @@ async def entrypoint(ctx: JobContext):
             video_enabled=False,
         ),
     )
+    
+    # Start avatar immediately after agent session starts (don't await fully)
+    if avatar_session:
+        import asyncio
+        asyncio.create_task(start_avatar())
     
     logger.info("Voice agent started and listening")
 

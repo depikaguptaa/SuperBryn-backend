@@ -116,23 +116,49 @@ async def book_appointment(date: str, time: str, description: str = "General app
     
     Args:
         date: The appointment date in YYYY-MM-DD format
-        time: The appointment time in HH:MM format (24-hour)
+        time: The appointment time (e.g., "2:00 PM", "14:00", "10:30 AM")
         description: Brief description of the appointment purpose
     """
     if not context.user_phone:
         return "I need to identify you first. Could you please provide your phone number?"
     
+    # Parse time - handle both 12-hour ("2:00 PM") and 24-hour ("14:00") formats
     try:
-        hour = int(time.split(":")[0])
+        time_upper = time.upper().strip()
+        
+        if "AM" in time_upper or "PM" in time_upper:
+            # 12-hour format: "2:00 PM", "10:30 AM"
+            is_pm = "PM" in time_upper
+            time_part = time_upper.replace("AM", "").replace("PM", "").strip()
+            parts = time_part.split(":")
+            hour = int(parts[0])
+            minute = int(parts[1]) if len(parts) > 1 else 0
+            
+            # Convert to 24-hour
+            if is_pm and hour != 12:
+                hour += 12
+            elif not is_pm and hour == 12:
+                hour = 0
+        else:
+            # 24-hour format: "14:00"
+            parts = time.split(":")
+            hour = int(parts[0])
+            minute = int(parts[1]) if len(parts) > 1 else 0
+        
+        # Validate time is within business hours (9 AM - 5 PM)
         if hour < 9 or hour >= 17:
             return "I'm sorry, appointments are only available between 9 AM and 5 PM. Please choose a different time."
-    except:
-        return "I couldn't understand that time. Please provide a time like 10:00 or 14:30."
+        
+        # Format to 24-hour string for database
+        time_24h = f"{hour:02d}:{minute:02d}"
+        
+    except Exception as e:
+        return f"I couldn't understand that time format. Please provide a time like '10:00 AM' or '2:30 PM'."
     
     result = db.book_appointment(
         user_phone=context.user_phone,
         date_str=date,
-        time_str=time,
+        time_str=time_24h,
         description=description
     )
     
@@ -140,23 +166,28 @@ async def book_appointment(date: str, time: str, description: str = "General app
         context.appointments_discussed.append({
             "action": "booked",
             "date": date,
-            "time": time,
+            "time": time_24h,
             "description": description
         })
         
-        hour = int(time.split(":")[0])
-        minute = time.split(":")[1]
+        # Format display time
         display_hour = hour if hour <= 12 else hour - 12
+        if display_hour == 0:
+            display_hour = 12
         am_pm = "AM" if hour < 12 else "PM"
         
-        return f"I've booked your appointment for {date} at {display_hour}:{minute} {am_pm}. The purpose noted is: {description}. Is there anything else I can help you with?"
+        return f"I've booked your appointment for {date} at {display_hour}:{minute:02d} {am_pm}. The purpose noted is: {description}. Is there anything else I can help you with?"
     else:
         return result["message"]
 
 
 @llm.function_tool(description="Retrieve all appointments for the current user.")
-async def retrieve_appointments() -> str:
-    """Get all appointments for the identified user."""
+async def retrieve_appointments(placeholder: str = "") -> str:
+    """Get all appointments for the identified user.
+    
+    Args:
+        placeholder: Unused placeholder parameter for API compatibility.
+    """
     if not context.user_phone:
         return "I need to identify you first. Could you please provide your phone number?"
     
